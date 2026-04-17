@@ -1,0 +1,261 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import optuna
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+st.set_page_config(page_title="Inventory AutoML + Viz", layout="wide")
+
+# Optuna
+def optimize_model(X, y, model_type, depth):
+    n_trials = {"Быстрое": 5, "Обычное": 20, "Долгое": 50}[depth]
+    tscv = TimeSeriesSplit(n_splits=3)
+    def objective(trial):
+        if model_type == "GB":
+            model = GradientBoostingRegressor(
+                n_estimators=trial.suggest_int("n_estimators", 50, 200),
+                learning_rate=trial.suggest_float("learning_rate", 0.01, 0.1),
+                max_depth=trial.suggest_int("max_depth", 3, 8),
+                random_state=42
+            )
+        else:
+            model = Ridge(alpha=trial.suggest_float("alpha", 0.1, 10.0))
+        
+        scores = []
+        for train_idx, val_idx in tscv.split(X):
+            model.fit(X[train_idx], y[train_idx])
+            scores.append(np.sqrt(mean_squared_error(y[val_idx], model.predict(X[val_idx]))))
+        return np.mean(scores)
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+    return study.best_params
+
+# Main function
+def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
+    summary_results = []
+    plot_data = {}
+
+    df_clean = input_df.copy()
+    df_clean['Product'] = df_clean['Product'].astype(str).str.strip()
+    
+    # Dates aggregation
+    df_clean = df_clean.groupby(['Product', 'Date']).agg({
+        'Demand': 'sum',
+        'Stock': 'last' 
+    }).reset_index()
+
+    for prod in df_clean['Product'].unique():
+        prod_df = df_clean[df_clean['Product'] == prod].sort_values('Date').copy()
+        prod_df['Demand_Lag1'] = prod_df['Demand'].shift(1)
+        prod_df = prod_df.dropna(subset=['Demand_Lag1'])
+        
+        price_row = prices_df[prices_df['Product'] == prod]
+        if price_row.empty or len(prod_df) < 10: continue
+        p = price_row.iloc[0]
+        
+        # Preservation
+        A = p.get('Preservation_A', 1.0)
+        
+        X = prod_df[['Demand_Lag1']].values
+        y = prod_df['Demand'].values
+        dates = prod_df['Date']
+        
+        split_idx = int(len(prod_df) * (1 - test_size))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        test_dates = dates[split_idx:]
+        
+        # Training
+        best_params_gb = optimize_model(X_train, y_train, "GB", depth)
+        best_params_ridge = optimize_model(X_train, y_train, "Ridge", depth)
+
+        model_gb = GradientBoostingRegressor(**best_params_gb).fit(X_train, y_train)
+        model_ridge = Ridge(**best_params_ridge).fit(X_train, y_train)
+
+        # Interval windows
+        best_w = 12
+        min_err = float('inf')
+        for w in [3, 6, 12, 18]:
+            val = y_train[-w:].max()
+            err = np.sqrt(mean_squared_error(y_train[-3:], [val]*3))
+            if err < min_err: min_err = err; best_w = w
+
+        preds_gb = model_gb.predict(X_test)
+        preds_ridge = model_ridge.predict(X_test)
+        preds_ch = np.full(len(y_test), y_train[-best_w:].max())
+
+        # Profit simulation
+        def get_metrics(strategy_name):
+        
+            current_stock = prod_df['Stock'].iloc[split_idx]
+            prof, short = 0, 0
+            
+            # Window initialization
+            history = list(y_train[-best_w:]) 
+            
+            # Dynamic window predictions
+            dynamic_preds = []
+            
+            for i in range(len(y_test)):
+                actual_d = y_test[i]
+                
+                # Target level
+                if strategy_name.startswith('Chausova'):
+                    # Adaptive d_max based on window
+                    current_d_max = max(history)
+                    target_level = current_d_max
+                elif strategy_name == 'GB':
+                    target_level = preds_gb[i]
+                elif strategy_name == 'Ridge':
+                    target_level = preds_ridge[i]
+                
+                dynamic_preds.append(target_level)
+
+                # Orders and sells
+                # Order to target level
+                u = max(0, target_level - current_stock)
+                available = current_stock + u
+                sold = min(actual_d, available)
+                
+                # Preservation
+                # Remains after sales
+                remains_after_sales = max(0, available - actual_d)
+                
+                # Spoiled units
+                spoiled_units = remains_after_sales * (1 - A)
+                
+                # Profit and shortage
+                revenue = sold * p['Sell_Price']
+                buy_cost = u * p['Buy_Price']
+                storage_cost = remains_after_sales * p['Storage_Price']
+                spoiled_cost = spoiled_units * p['Buy_Price']
+                
+                prof += (revenue - buy_cost - storage_cost - spoiled_cost)
+                short += max(0, actual_d - available)
+
+                # Stock update
+                current_stock = remains_after_sales * A
+                
+                # Window update
+                history.append(actual_d)
+                history.pop(0)
+            
+            return prof, short, dynamic_preds
+
+        # Results visualization
+        plot_data[prod] = pd.DataFrame({'Date': test_dates, 'Actual': y_test})
+
+        for m_name in ['GB', 'Ridge', f'Chausova_{best_w}m']:
+            pr, sh, d_preds = get_metrics(m_name)
+            summary_results.append({
+                'Продукт': prod, 
+                'Стратегия': m_name, 
+                'Прибыль': pr, 
+                'Дефицит': sh
+            })
+            
+            # Теперь ключи будут создаваться корректно в существующем DataFrame
+            if 'Chausova' in m_name:
+                plot_data[prod]['Chausova'] = d_preds
+            elif m_name == 'GB':
+                plot_data[prod]['GB'] = d_preds
+            elif m_name == 'Ridge':
+                plot_data[prod]['Ridge'] = d_preds
+            
+    return pd.DataFrame(summary_results), plot_data
+
+# UI
+st.title("Прогноз спроса")
+
+with st.sidebar:
+    data_file = st.file_uploader("Загрузить CSV", type="csv")
+    price_file = st.file_uploader("Загрузить CSV с ценами (опционально)", type="csv")
+    test_val = st.slider("Тестовая выборка (доля)", 0.1, 0.8, 0.2)
+    depth_val = st.select_slider("Глубина Optuna", ["Быстрое", "Обычное", "Долгое"], "Быстрое")
+
+if data_file:
+    df = pd.read_csv(data_file, sep=';')
+    # print(df)
+    # print(df.columns)
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', format='%m/%Y')
+    st.write(df)
+
+    st.write("### Настройка параметров материалов")
+    st.caption("A = 1.0 (полная сохранность), A = 0.95 (5% потерь в период)")
+    
+    # Prices loading
+    if price_file:
+        input_prices_df = pd.read_csv(price_file, index_col=0)
+        # Missing files have 0s in it's prices
+        missing_prods = [p for p in df['Product'].unique() if p not in input_prices_df['Product'].values]
+        if missing_prods:
+            extra_df = pd.DataFrame({
+                "Product": missing_prods,
+                "Buy_Price": [0.0]*len(missing_prods),
+                "Sell_Price": [0.0]*len(missing_prods),
+                "Storage_Price": [0.0]*len(missing_prods),
+                "Preservation_A": [1.0]*len(missing_prods)
+            })
+            input_prices_df = pd.concat([input_prices_df, extra_df], ignore_index=True)
+    else:
+        # Default prices
+        input_prices_df = pd.DataFrame({
+            "Product": df['Product'].unique(),
+            "Buy_Price": [100.0]*len(df['Product'].unique()),
+            "Sell_Price": [180.0]*len(df['Product'].unique()),
+            "Storage_Price": [5.0]*len(df['Product'].unique()),
+            "Preservation_A": [1.0]*len(df['Product'].unique())
+        })
+
+    # Prices editor
+    prices_df = st.data_editor(input_prices_df, key="editor", hide_index=True)
+
+    if st.button("🚀 Запустить расчет и графики"):
+        res_df, plots = run_full_analysis_with_plots(df, prices_df, test_val, depth_val)
+        
+        st.session_state['res_df'] = res_df
+        st.session_state['plots'] = plots
+
+    if 'res_df' in st.session_state:
+        st.write("---")
+        # Best models for every product type
+        st.write("### 🏆 Лучшие стратегии по продуктам")
+        best_per_prod = st.session_state['res_df'].sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
+        st.dataframe(best_per_prod)
+        
+        # All models on every product type
+        with st.expander("Показать все результаты"):
+            st.dataframe(st.session_state['res_df'])
+        
+        st.write("---")
+        st.write("### 📊 Детальные графики")
+        
+        selected_p = st.selectbox("Выберите материал:", list(st.session_state['plots'].keys()))
+        p_df = st.session_state['plots'][selected_p].sort_values('Date')
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(p_df['Date'], p_df['Actual'], label='Реальный спрос', color='black', marker='o', linewidth=2, zorder=3)
+        ax.plot(p_df['Date'], p_df['GB'], '--', label='Прогноз GB', alpha=0.8)
+        ax.plot(p_df['Date'], p_df['Ridge'], '--', label='Прогноз Ridge', alpha=0.8)
+        ax.step(p_df['Date'], p_df['Chausova'], label='Максимальный спрос за интервал', where='post', color='red', linewidth=2)
+        
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        plt.xticks(rotation=45)
+        
+        ax.set_title(f"Сравнение моделей для: {selected_p}")
+        ax.set_ylabel("Количество")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        st.pyplot(fig)
+        
+        # Best model for that product type
+        prod_best = best_per_prod[best_per_prod['Продукт'] == selected_p].iloc[0]
+        st.success(f"Оптимальный выбор: **{prod_best['Стратегия']}** | Ожидаемая прибыль: {round(prod_best['Прибыль'], 2)}")
