@@ -96,7 +96,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         model_configs = {
             'GB': str(best_params_gb),
             'Ridge': f"alpha: {round(best_params_ridge['alpha'], 4)}",
-            f'Chausova_{best_w}m': f"Размер окна (w): {best_w} месяцев"
+            f'Interval_{best_w}m': f"Размер окна (w): {best_w} месяцев"
         }
         # Profit simulation
         def get_metrics(strategy_name):
@@ -114,7 +114,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 actual_d = y_test[i]
                 
                 # Target level
-                if strategy_name.startswith('Chausova'):
+                if strategy_name.startswith('Interval'):
                     # Adaptive d_max based on window
                     current_d_max = max(history)
                     target_level = current_d_max
@@ -159,7 +159,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         # Results visualization
         plot_data[prod] = pd.DataFrame({'Date': test_dates, 'Actual': y_test})
 
-        for m_name in ['GB', 'Ridge', f'Chausova_{best_w}m']:
+        for m_name in ['GB', 'Ridge', f'Interval_{best_w}m']:
             pr, sh, d_preds = get_metrics(m_name)
             summary_results.append({
                 'Продукт': prod, 
@@ -170,8 +170,8 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
             })
             
             # Теперь ключи будут создаваться корректно в существующем DataFrame
-            if 'Chausova' in m_name:
-                plot_data[prod]['Chausova'] = d_preds
+            if 'Interval' in m_name:
+                plot_data[prod]['Interval'] = d_preds
             elif m_name == 'GB':
                 plot_data[prod]['GB'] = d_preds
             elif m_name == 'Ridge':
@@ -260,7 +260,7 @@ if data_file:
         ax.plot(p_df['Date'], p_df['Actual'], label='Реальный спрос', color='black', marker='o', linewidth=2, zorder=3)
         ax.plot(p_df['Date'], p_df['GB'], '--', label='Прогноз GB', alpha=0.8)
         ax.plot(p_df['Date'], p_df['Ridge'], '--', label='Прогноз Ridge', alpha=0.8)
-        ax.step(p_df['Date'], p_df['Chausova'], label='Максимальный спрос за интервал', where='post', color='red', linewidth=2)
+        ax.step(p_df['Date'], p_df['Interval'], label='Максимальный спрос за интервал', where='post', color='red', linewidth=2)
         
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
