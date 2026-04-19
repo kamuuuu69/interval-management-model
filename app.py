@@ -75,6 +75,8 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         best_params_gb = optimize_model(X_train, y_train, "GB", depth)
         best_params_ridge = optimize_model(X_train, y_train, "Ridge", depth)
 
+        
+
         model_gb = GradientBoostingRegressor(**best_params_gb).fit(X_train, y_train)
         model_ridge = Ridge(**best_params_ridge).fit(X_train, y_train)
 
@@ -90,6 +92,12 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         preds_ridge = model_ridge.predict(X_test)
         preds_ch = np.full(len(y_test), y_train[-best_w:].max())
 
+        # Model configs
+        model_configs = {
+            'GB': str(best_params_gb),
+            'Ridge': f"alpha: {round(best_params_ridge['alpha'], 4)}",
+            f'Chausova_{best_w}m': f"Размер окна (w): {best_w} месяцев"
+        }
         # Profit simulation
         def get_metrics(strategy_name):
         
@@ -134,7 +142,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 revenue = sold * p['Sell_Price']
                 buy_cost = u * p['Buy_Price']
                 storage_cost = remains_after_sales * p['Storage_Price']
-                spoiled_cost = spoiled_units * p['Buy_Price']
+                spoiled_cost = spoiled_units * p['Utilization_Cost']
                 
                 prof += (revenue - buy_cost - storage_cost - spoiled_cost)
                 short += max(0, actual_d - available)
@@ -157,7 +165,8 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 'Продукт': prod, 
                 'Стратегия': m_name, 
                 'Прибыль': pr, 
-                'Дефицит': sh
+                'Дефицит': sh,
+                'Параметры': model_configs[m_name]
             })
             
             # Теперь ключи будут создаваться корректно в существующем DataFrame
@@ -184,10 +193,9 @@ if data_file:
     # print(df)
     # print(df.columns)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce', format='%m/%Y')
-    st.write(df)
+    #st.write(df)
 
     st.write("### Настройка параметров материалов")
-    st.caption("A = 1.0 (полная сохранность), A = 0.95 (5% потерь в период)")
     
     # Prices loading
     if price_file:
@@ -200,6 +208,7 @@ if data_file:
                 "Buy_Price": [0.0]*len(missing_prods),
                 "Sell_Price": [0.0]*len(missing_prods),
                 "Storage_Price": [0.0]*len(missing_prods),
+                "Utilization_Cost": [0.0]*len(missing_prods),
                 "Preservation_A": [1.0]*len(missing_prods)
             })
             input_prices_df = pd.concat([input_prices_df, extra_df], ignore_index=True)
@@ -210,6 +219,7 @@ if data_file:
             "Buy_Price": [100.0]*len(df['Product'].unique()),
             "Sell_Price": [180.0]*len(df['Product'].unique()),
             "Storage_Price": [5.0]*len(df['Product'].unique()),
+            "Utilization_Cost": [0.0]*len(df['Product'].unique()),
             "Preservation_A": [1.0]*len(df['Product'].unique())
         })
 
@@ -224,20 +234,27 @@ if data_file:
 
     if 'res_df' in st.session_state:
         st.write("---")
-        # Best models for every product type
+        res_df = st.session_state['res_df']
+        plots = st.session_state['plots']
+
         st.write("### 🏆 Лучшие стратегии по продуктам")
-        best_per_prod = st.session_state['res_df'].sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
+        # Теперь используем локальную переменную res_df, которая гарантированно определена выше
+        best_per_prod = res_df.sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
         st.dataframe(best_per_prod)
         
+        # All models params
+        with st.expander("🔍 Посмотреть все обученные модели и их настройки"):
+            st.dataframe(res_df, use_container_width=True, hide_index=True)
+            
         # All models on every product type
         with st.expander("Показать все результаты"):
-            st.dataframe(st.session_state['res_df'])
+            st.dataframe(res_df) # Используем ту же переменную
         
         st.write("---")
         st.write("### 📊 Детальные графики")
         
-        selected_p = st.selectbox("Выберите материал:", list(st.session_state['plots'].keys()))
-        p_df = st.session_state['plots'][selected_p].sort_values('Date')
+        selected_p = st.selectbox("Выберите материал:", list(plots.keys()))
+        p_df = plots[selected_p].sort_values('Date')
         
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(p_df['Date'], p_df['Actual'], label='Реальный спрос', color='black', marker='o', linewidth=2, zorder=3)
