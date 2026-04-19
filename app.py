@@ -157,7 +157,11 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
             return prof, short, dynamic_preds
 
         # Results visualization
-        plot_data[prod] = pd.DataFrame({'Date': test_dates, 'Actual': y_test})
+        plot_data[prod] = pd.DataFrame({
+            'Date': dates, 
+            'Actual': y,
+            'Is_Test': [False] * len(y_train) + [True] * len(y_test)
+        })
 
         for m_name in ['GB', 'Ridge', f'Interval_{best_w}m']:
             pr, sh, d_preds = get_metrics(m_name)
@@ -169,15 +173,51 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 'Параметры': model_configs[m_name]
             })
             
-            # Теперь ключи будут создаваться корректно в существующем DataFrame
+            full_preds = [np.nan] * len(y_train) + list(d_preds)
+
             if 'Interval' in m_name:
-                plot_data[prod]['Interval'] = d_preds
+                plot_data[prod]['Interval'] = full_preds
             elif m_name == 'GB':
-                plot_data[prod]['GB'] = d_preds
+                plot_data[prod]['GB'] = full_preds
             elif m_name == 'Ridge':
-                plot_data[prod]['Ridge'] = d_preds
+                plot_data[prod]['Ridge'] = full_preds
             
     return pd.DataFrame(summary_results), plot_data
+
+def get_abc_xyz_analysis(df, prices_df):
+    # Revenue for each product
+    analysis = df.groupby('Product')['Demand'].sum().reset_index()
+    
+    # Merge with prices and counting total profit
+    analysis = analysis.merge(prices_df[['Product', 'Sell_Price', 'Buy_Price']], on='Product')
+    analysis['Total_Profit'] = analysis['Demand'] * (analysis['Sell_Price'] - analysis['Buy_Price'])
+    
+    # ABC analysis
+    analysis = analysis.sort_values('Total_Profit', ascending=False)
+    analysis['CumSum'] = analysis['Total_Profit'].cumsum()
+    total_profit = analysis['Total_Profit'].sum()
+    analysis['CumPercent'] = analysis['CumSum'] / total_profit * 100
+    
+    def abc_classify(percent):
+        if percent <= 80: return 'A'
+        if percent <= 95: return 'B'
+        return 'C'
+    
+    analysis['ABC'] = analysis['CumPercent'].apply(abc_classify)
+    
+    # XYZ analysis
+    # Counting variation
+    variation = df.groupby('Product')['Demand'].agg(['std', 'mean']).reset_index()
+    variation['CV'] = variation['std'] / variation['mean']
+    
+    def xyz_classify(cv):
+        if cv <= 0.1: return 'X'
+        if cv <= 0.25: return 'Y'
+        return 'Z'
+    
+    variation['XYZ'] = variation['CV'].apply(xyz_classify)
+    
+    return analysis.merge(variation[['Product', 'XYZ', 'CV']], on='Product')[['Product', 'ABC', 'XYZ', 'CV']]
 
 # UI
 st.title("Прогноз спроса")
@@ -233,14 +273,46 @@ if data_file:
         st.session_state['plots'] = plots
 
     if 'res_df' in st.session_state:
+
         st.write("---")
         res_df = st.session_state['res_df']
         plots = st.session_state['plots']
 
+        # ABC/XYZ analysis
+        st.write("### ABC/XYZ Классификация")
+        
+        abc_xyz_df = get_abc_xyz_analysis(df, prices_df) 
+        
+        col_m1, col_m2 = st.columns([1, 2])
+        with col_m1:
+            # Матрица распределения
+            matrix_stats = abc_xyz_df.groupby(['ABC', 'XYZ']).size().unstack(fill_value=0)
+            st.write("**Матрица (кол-во товаров):**")
+            st.dataframe(matrix_stats)
+            
+        with col_m2:
+            st.write("**Справка по категориям:**")
+            st.info("""
+            * **A:** Высокая важность, 80% дохода, 20% ассортимента
+            * **B:** Средняя важность, 15% дохода, 30% ассортимента.
+            * **C:** Низкая важность, 5% дохода, 50% ассортимента.
+            * **X:** Стабильный спрос, высокая точность прогноза (коэф. вариации 0-10%).
+            * **Y:** Колебания спроса, средняя точность прогноза (коэф. вариации 10-25%).
+            * **Z:** Нестабильный спрос, низкая точность прогноза (коэф. вариации более 25%).
+            """)
+        
+        with st.expander("Посмотреть полный список категорий"):
+            st.dataframe(abc_xyz_df, hide_index=True, use_container_width=True)
+        # ----------------------------------
+
+        st.write("---")
         st.write("### 🏆 Лучшие стратегии по продуктам")
-        # Теперь используем локальную переменную res_df, которая гарантированно определена выше
+        
+        # Resilts merging
         best_per_prod = res_df.sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
-        st.dataframe(best_per_prod)
+        best_with_abc = best_per_prod.merge(abc_xyz_df[['Product', 'ABC', 'XYZ']], left_on='Продукт', right_on='Product').drop(columns=['Product'])
+        
+        st.dataframe(best_with_abc, hide_index=True)
         
         # All models params
         with st.expander("🔍 Посмотреть все обученные модели и их настройки"):
@@ -248,7 +320,7 @@ if data_file:
             
         # All models on every product type
         with st.expander("Показать все результаты"):
-            st.dataframe(res_df) # Используем ту же переменную
+            st.dataframe(res_df)
         
         st.write("---")
         st.write("### 📊 Детальные графики")
@@ -256,20 +328,27 @@ if data_file:
         selected_p = st.selectbox("Выберите материал:", list(plots.keys()))
         p_df = plots[selected_p].sort_values('Date')
         
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(p_df['Date'], p_df['Actual'], label='Реальный спрос', color='black', marker='o', linewidth=2, zorder=3)
-        ax.plot(p_df['Date'], p_df['GB'], '--', label='Прогноз GB', alpha=0.8)
-        ax.plot(p_df['Date'], p_df['Ridge'], '--', label='Прогноз Ridge', alpha=0.8)
-        ax.step(p_df['Date'], p_df['Interval'], label='Максимальный спрос за интервал', where='post', color='red', linewidth=2)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        split_date = p_df[p_df['Is_Test'] == True]['Date'].min()
+        
+        ax.plot(p_df['Date'], p_df['Actual'], label='Реальный спрос', color='black', marker='o', alpha=0.3, zorder=1)
+        
+        test_only = p_df[p_df['Is_Test'] == True]
+        ax.plot(test_only['Date'], test_only['Actual'], color='black', marker='o', linewidth=2, label='Тест (факт)', zorder=2)
+
+        ax.plot(p_df['Date'], p_df['GB'], '--', label='Прогноз GB', linewidth=2)
+        ax.plot(p_df['Date'], p_df['Ridge'], '--', label='Прогноз Ridge', linewidth=2)
+        ax.step(p_df['Date'], p_df['Interval'], label='Максимальный спрос за интервал', where='post', color='red', alpha=0.7)
+
+        ax.axvline(x=split_date, color='blue', linestyle='-', alpha=0.5, label='Разделение Train/Test')
+        
+        ax.axvspan(p_df['Date'].min(), split_date, color='gray', alpha=0.1, label='Зона обучения')
         
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
         plt.xticks(rotation=45)
-        
-        ax.set_title(f"Сравнение моделей для: {selected_p}")
-        ax.set_ylabel("Количество")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        ax.grid(True, alpha=0.2)
         
         st.pyplot(fig)
         
