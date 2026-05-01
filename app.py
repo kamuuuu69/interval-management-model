@@ -175,7 +175,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 'Стратегия': m_name, 
                 'Прибыль (руб.)': pr, 
                 'Дефицит (Шт.)': sh,
-                'RMSE': round(rmse, 2),
+                'RMSE (Шт.)': round(rmse, 2),
                 'Параметры': model_configs.get(m_name, "N/A")
             })
             
