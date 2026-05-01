@@ -277,10 +277,10 @@ if data_file:
     input_prices_df = input_prices_df.rename(columns=rename_map)
     # Prices editor
     prices_df = st.data_editor(input_prices_df, key="editor", hide_index=True)
-
+    reverse_map = {v: k for k, v in rename_map.items()}
+    prices_df_ready = prices_df.rename(columns=reverse_map)
+    
     if st.button("🚀 Запустить расчет и графики"):
-        reverse_map = {v: k for k, v in rename_map.items()}
-        prices_df_ready = prices_df.rename(columns=reverse_map)
         res_df, plots = run_full_analysis_with_plots(df, prices_df_ready, test_val, depth_val)
         
         st.session_state['res_df'] = res_df
