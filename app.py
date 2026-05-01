@@ -94,9 +94,9 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
 
         # Model configs
         model_configs = {
-            'GB': str(best_params_gb),
-            'Ridge': f"alpha: {round(best_params_ridge['alpha'], 4)}",
-            f'Interval_{best_w}m': f"Размер окна (w): {best_w} месяцев"
+            'GB': f"Глубина: {best_params_gb['max_depth']}, Деревьев: {best_params_gb['n_estimators']}",
+            'Ridge': f"Alpha: {round(best_params_ridge['alpha'], 4)}",
+            f'Interval_{best_w}m': f"Окно: {best_w} мес."
         }
         # Profit simulation
         def get_metrics(strategy_name):
@@ -153,8 +153,11 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
                 # Window update
                 history.append(actual_d)
                 history.pop(0)
+
+            # RMSE on test
+            rmse_test = np.sqrt(mean_squared_error(y_test, dynamic_preds))
             
-            return prof, short, dynamic_preds
+            return prof, short, dynamic_preds, rmse_test
 
         # Results visualization
         plot_data[prod] = pd.DataFrame({
@@ -164,13 +167,16 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         })
 
         for m_name in ['GB', 'Ridge', f'Interval_{best_w}m']:
-            pr, sh, d_preds = get_metrics(m_name)
+            internal_name = m_name.split('_')[0] if 'Interval' in m_name else m_name
+
+            pr, sh, d_preds, rmse = get_metrics(internal_name)
             summary_results.append({
                 'Продукт': prod, 
                 'Стратегия': m_name, 
                 'Прибыль': pr, 
                 'Дефицит': sh,
-                'Параметры': model_configs[m_name]
+                'RMSE': round(rmse, 2),
+                'Параметры': model_configs.get(m_name, "N/A")
             })
             
             full_preds = [np.nan] * len(y_train) + list(d_preds)
@@ -217,7 +223,8 @@ def get_abc_xyz_analysis(df, prices_df):
     
     variation['XYZ'] = variation['CV'].apply(xyz_classify)
     
-    return analysis.merge(variation[['Product', 'XYZ', 'CV']], on='Product')[['Product', 'ABC', 'XYZ', 'CV']]
+    res = analysis.merge(variation[['Product', 'XYZ', 'CV']], on='Product')
+    return res[['Product', 'ABC', 'XYZ', 'CV']].rename(columns={'Product': 'Продукт', 'CV': 'Коэф. вариации'})
 
 # UI
 st.title("Прогноз спроса")
@@ -234,7 +241,7 @@ if data_file:
     # print(df.columns)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce', format='%m/%Y')
     #st.write(df)
-
+    columns_ru = ["Продукт", "Цена закупки", "Цена продажи", "Цена хранения", "Стоимость утилизации", "Сохранность (A)"]
     st.write("### Настройка параметров материалов")
     
     # Prices loading
@@ -262,12 +269,19 @@ if data_file:
             "Utilization_Cost": [0.0]*len(df['Product'].unique()),
             "Preservation_A": [1.0]*len(df['Product'].unique())
         })
-
+    # Rename prices to russian
+    rename_map = {
+            "Product": "Продукт", "Buy_Price": "Цена закупки", "Sell_Price": "Цена продажи",
+            "Storage_Price": "Цена хранения", "Utilization_Cost": "Стоимость утилизации", "Preservation_A": "Сохранность (A)"
+    }
+    input_prices_df = input_prices_df.rename(columns=rename_map)
     # Prices editor
     prices_df = st.data_editor(input_prices_df, key="editor", hide_index=True)
 
     if st.button("🚀 Запустить расчет и графики"):
-        res_df, plots = run_full_analysis_with_plots(df, prices_df, test_val, depth_val)
+        reverse_map = {v: k for k, v in rename_map.items()}
+        prices_df_ready = prices_df.rename(columns=reverse_map)
+        res_df, plots = run_full_analysis_with_plots(df, prices_df_ready, test_val, depth_val)
         
         st.session_state['res_df'] = res_df
         st.session_state['plots'] = plots
@@ -281,7 +295,7 @@ if data_file:
         # ABC/XYZ analysis
         st.write("### ABC/XYZ Классификация")
         
-        abc_xyz_df = get_abc_xyz_analysis(df, prices_df) 
+        abc_xyz_df = get_abc_xyz_analysis(df, prices_df_ready) 
         
         col_m1, col_m2 = st.columns([1, 2])
         with col_m1:
@@ -310,7 +324,7 @@ if data_file:
         
         # Resilts merging
         best_per_prod = res_df.sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
-        best_with_abc = best_per_prod.merge(abc_xyz_df[['Product', 'ABC', 'XYZ']], left_on='Продукт', right_on='Product').drop(columns=['Product'])
+        best_with_abc = best_per_prod.merge(abc_xyz_df[['Продукт', 'ABC', 'XYZ']], left_on='Продукт', right_on='Продукт')
         
         st.dataframe(best_with_abc, hide_index=True)
         
