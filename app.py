@@ -173,8 +173,8 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
             summary_results.append({
                 'Продукт': prod, 
                 'Стратегия': m_name, 
-                'Прибыль': pr, 
-                'Дефицит': sh,
+                'Прибыль (руб.)': pr, 
+                'Дефицит (Шт.)': sh,
                 'RMSE': round(rmse, 2),
                 'Параметры': model_configs.get(m_name, "N/A")
             })
@@ -241,7 +241,6 @@ if data_file:
     # print(df.columns)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce', format='%m/%Y')
     #st.write(df)
-    columns_ru = ["Продукт", "Цена закупки", "Цена продажи", "Цена хранения", "Стоимость утилизации", "Сохранность (A)"]
     st.write("### Настройка параметров материалов")
     
     # Prices loading
@@ -271,15 +270,15 @@ if data_file:
         })
     # Rename prices to russian
     rename_map = {
-            "Product": "Продукт", "Buy_Price": "Цена закупки", "Sell_Price": "Цена продажи",
-            "Storage_Price": "Цена хранения", "Utilization_Cost": "Стоимость утилизации", "Preservation_A": "Сохранность (A)"
+            "Product": "Продукт", "Buy_Price": "Цена закупки (руб.)", "Sell_Price": "Цена продажи (руб.)",
+            "Storage_Price": "Цена хранения (руб.)", "Utilization_Cost": "Стоимость утилизации (руб.)", "Preservation_A": "Сохранность (A)"
     }
     input_prices_df = input_prices_df.rename(columns=rename_map)
     # Prices editor
     prices_df = st.data_editor(input_prices_df, key="editor", hide_index=True)
     reverse_map = {v: k for k, v in rename_map.items()}
     prices_df_ready = prices_df.rename(columns=reverse_map)
-    
+
     if st.button("🚀 Запустить расчет и графики"):
         res_df, plots = run_full_analysis_with_plots(df, prices_df_ready, test_val, depth_val)
         
@@ -323,7 +322,7 @@ if data_file:
         st.write("### 🏆 Лучшие стратегии по продуктам")
         
         # Resilts merging
-        best_per_prod = res_df.sort_values('Прибыль', ascending=False).drop_duplicates('Продукт')
+        best_per_prod = res_df.sort_values('Прибыль (руб.)', ascending=False).drop_duplicates('Продукт')
         best_with_abc = best_per_prod.merge(abc_xyz_df[['Продукт', 'ABC', 'XYZ']], left_on='Продукт', right_on='Продукт')
         
         st.dataframe(best_with_abc, hide_index=True)
@@ -368,4 +367,4 @@ if data_file:
         
         # Best model for that product type
         prod_best = best_per_prod[best_per_prod['Продукт'] == selected_p].iloc[0]
-        st.success(f"Оптимальный выбор: **{prod_best['Стратегия']}** | Ожидаемая прибыль: {round(prod_best['Прибыль'], 2)}")
+        st.success(f"Оптимальный выбор: **{prod_best['Стратегия']}** | Ожидаемая прибыль: {round(prod_best['Прибыль (руб.)'], 2)}(руб.)")
