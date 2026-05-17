@@ -32,7 +32,8 @@ def optimize_model(X, y, model_type, depth):
             scores.append(np.sqrt(mean_squared_error(y[val_idx], model.predict(X[val_idx]))))
         return np.mean(scores)
 
-    study = optuna.create_study(direction="minimize")
+    sampler = optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
 
@@ -99,8 +100,14 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
             f'Interval_{best_w}m': f"Окно: {best_w} мес."
         }
         # Profit simulation
-        def get_metrics(strategy_name):
-        
+        def get_metrics(strategy_name, model_obj=None, X_train=None, y_train=None, X_test=None, y_test=None):
+            # RMSE on train
+            if strategy_name == 'Interval':
+                train_preds = pd.Series(y_train).rolling(window=best_w, min_periods=1).max().shift(1).fillna(y_train[0]).values
+            else:
+                train_preds = model_obj.predict(X_train)
+            
+            rmse_train = np.sqrt(mean_squared_error(y_train, train_preds))
             current_stock = prod_df['Stock'].iloc[split_idx]
             prof, short = 0, 0
             
@@ -157,7 +164,7 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
             # RMSE on test
             rmse_test = np.sqrt(mean_squared_error(y_test, dynamic_preds))
             
-            return prof, short, dynamic_preds, rmse_test
+            return prof, short, dynamic_preds, rmse_test, rmse_train
 
         # Results visualization
         plot_data[prod] = pd.DataFrame({
@@ -167,15 +174,31 @@ def run_full_analysis_with_plots(input_df, prices_df, test_size, depth):
         })
 
         for m_name in ['GB', 'Ridge', f'Interval_{best_w}m']:
-            internal_name = m_name.split('_')[0] if 'Interval' in m_name else m_name
-
-            pr, sh, d_preds, rmse = get_metrics(internal_name)
+            if m_name == 'GB':
+                curr_model = model_gb
+                internal_name = 'GB'
+            elif m_name == 'Ridge':
+                curr_model = model_ridge
+                internal_name = 'Ridge'
+            else:
+                curr_model = None
+                internal_name = 'Interval'
+                
+            pr, sh, d_preds, rmse_t, rmse_tr = get_metrics(
+                internal_name, 
+                model_obj=curr_model, 
+                X_train=X_train, 
+                y_train=y_train, 
+                X_test=X_test, 
+                y_test=y_test
+            )
             summary_results.append({
                 'Продукт': prod, 
                 'Стратегия': m_name, 
-                'Прибыль (руб.)': pr, 
-                'Дефицит (Шт.)': sh,
-                'RMSE (Шт.)': round(rmse, 2),
+                'Прибыль (руб.)': round(pr, 2), 
+                'Дефицит (ед.)': round (sh, 2),
+                'RMSE на обучении (ед.)': round(rmse_tr, 2),
+                'RMSE на тесте (ед.)': round(rmse_t, 2),
                 'Параметры': model_configs.get(m_name, "N/A")
             })
             
@@ -280,8 +303,14 @@ if data_file:
     prices_df_ready = prices_df.rename(columns=reverse_map)
 
     if st.button("🚀 Запустить расчет и графики"):
-        res_df, plots = run_full_analysis_with_plots(df, prices_df_ready, test_val, depth_val)
+        df_sorted = df.sort_values('Date')
+        unique_dates = df_sorted['Date'].unique()
+        split_point = unique_dates[int(len(unique_dates) * (1 - test_val))]
         
+        train_df = df_sorted[df_sorted['Date'] < split_point]
+        res_df, plots = run_full_analysis_with_plots(df, prices_df_ready, test_val, depth_val)
+
+        st.session_state['train_df'] = train_df
         st.session_state['res_df'] = res_df
         st.session_state['plots'] = plots
 
@@ -290,11 +319,12 @@ if data_file:
         st.write("---")
         res_df = st.session_state['res_df']
         plots = st.session_state['plots']
+        train_df = st.session_state['train_df']
 
         # ABC/XYZ analysis
         st.write("### ABC/XYZ Классификация")
         
-        abc_xyz_df = get_abc_xyz_analysis(df, prices_df_ready) 
+        abc_xyz_df = get_abc_xyz_analysis(train_df, prices_df_ready) 
         
         col_m1, col_m2 = st.columns([1, 2])
         with col_m1:
@@ -330,10 +360,6 @@ if data_file:
         # All models params
         with st.expander("🔍 Посмотреть все обученные модели и их настройки"):
             st.dataframe(res_df, use_container_width=True, hide_index=True)
-            
-        # All models on every product type
-        with st.expander("Показать все результаты"):
-            st.dataframe(res_df)
         
         st.write("---")
         st.write("### 📊 Детальные графики")
@@ -364,7 +390,28 @@ if data_file:
         ax.grid(True, alpha=0.2)
         
         st.pyplot(fig)
+        # Prediction table
+        st.write(f"#### Таблица прогнозов для: {selected_p}")
         
+        forecast_table = p_df[p_df['Is_Test'] == True].copy()
+        
+        columns_to_show = ['Date', 'Actual', 'GB', 'Ridge', 'Interval']
+        forecast_table = forecast_table[columns_to_show]
+        forecast_table['Date'] = forecast_table['Date'].dt.strftime('%Y-%m')
+        
+        forecast_table.columns = [
+            'Дата', 
+            'Факт (спрос)', 
+            'Прогноз GB', 
+            'Прогноз Ridge', 
+            'Интервальный (max)'
+        ]
+        
+        st.dataframe(
+            forecast_table.style.format(precision=2), 
+            use_container_width=True, 
+            hide_index=True
+        )
         # Best model for that product type
         prod_best = best_per_prod[best_per_prod['Продукт'] == selected_p].iloc[0]
         st.success(f"Оптимальный выбор: **{prod_best['Стратегия']}** | Ожидаемая прибыль: {round(prod_best['Прибыль (руб.)'], 2)}(руб.)")
